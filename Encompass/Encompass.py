@@ -61,6 +61,7 @@ async def drink(ctx, x:int):
 async def stopdrink(ctx):
     if not drinksession.is_active:
         await ctx.send(f"No drink reminders currently active. Start one!")
+        return
     drinksession.is_active = False
     water_reminder.stop()
     await ctx.send(f"Water reminder stopped. Don't forget to hydrate yourself!")
@@ -76,37 +77,9 @@ class MusicQueue:
     
     #Adding functions of a queue
     async def enqueue(self,url:str):
-        title = await self.get_title(url)
-        self.queue.append({"url": url, "title": title})
-    
-    async def get_title(self, url: str) -> str:
-        video_id = await self.search_youtube(url)
-        if not video_id:
-            raise ValueError("Could not find a video for the provided URL or query.")
-        return await self.get_video_title(video_id)
-    
-    async def search_youtube(self, query: str) -> str:
-        request = youtube.search().list(
-            q=query,
-            part="id",
-            maxResults=1,
-            type="video"
-        )
-        response = request.execute()
-        if response['items']:
-            return response['items'][0]['id']['videoId']
-        return None
-    
-    async def get_video_title(self, video_id: str) -> str:
-        request = youtube.videos().list(
-            part="snippet",
-            id=video_id
-        )
-        response = request.execute()
-        if response['items']:
-            return response['items'][0]['snippet']['title']
-        return "Unknown Title"
-    
+        player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
+        self.queue.append(player)
+
     def dequeue(self):
         if not self.is_empty():
             return self.queue.pop(0)
@@ -126,8 +99,8 @@ class MusicQueue:
         counter = 1
         if not self.is_empty():
             await ctx.send("Songs in Queue\n")
-            for i in self.queue:
-                await ctx.send(f"{counter}: {i['title']}")
+            for player in self.queue:
+                await ctx.send(f"{counter}: {player.title}")
                 counter +=1
         else:
             await ctx.send("The queue is empty.")
@@ -152,7 +125,7 @@ ytdl_format_options = {
 
 ffmpeg_options = {
     'executable': ffmpeg_path,
-    'options': '-vn -buffer_size 10240k' #Tells ffmpeg to skip video stream and process only the audio stream
+    'options': '-vn' #Tells ffmpeg to skip video stream and process only the audio stream
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options) #YoutubeDL is a class within discord.py, passes in formatting options for the youtube vid
@@ -178,7 +151,7 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
         if re.match(r'^https?://(?:www\.)?youtube\.com/watch\?v=', url):
             data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
         else:
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f'ytsearch1:"{url}"', download=not stream))
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f'{url}', download=not stream))
 
         #Structure for 'data' for a playlist contains 'entries', so this is to check if we want to stream a playlist or a single video
         if 'entries' in data:
@@ -201,11 +174,9 @@ async def play(ctx,*, url:str):
     if ctx.voice_client is None: #If the bot is currently connected to a voice channel
         await channel.connect()
 
-    
     #Add the song to a queue
     await Music_Queue.enqueue(url)
     await ctx.send("Added to queue.")
-    await Music_Queue.printqueue(ctx)
     
     #keeps playing the next song in queue
     if not ctx.voice_client.is_playing():
@@ -216,11 +187,110 @@ async def playnext(ctx):
         await ctx.send("The queue is empty.")
         return
     
-    item = Music_Queue.dequeue()
-    player = await YTDLSource.from_url(item["url"], loop=bot.loop, stream=True)
+    player = Music_Queue.dequeue()
     ctx.voice_client.play(player, after=lambda e: bot.loop.create_task(playnext(ctx)))
     
     await ctx.send(f"Now playing: {player.title}")
 
+@bot.command()
+async def skip(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel.")
+        return
+    
+    if not ctx.voice_client.is_playing():
+        await ctx.send("There's no music in queue.")
+        return
+    
+    ctx.voice_client.stop() #playnext(ctx) will automatically be called as it is set as the "after" callback
+    await ctx.send("Song skipped")
 
+@bot.command()
+async def queue(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel.")
+        return
+    
+    if not ctx.voice_client.is_playing():
+        await ctx.send("There's no music in queue.")
+        return
+    
+    await Music_Queue.printqueue(ctx)
+
+@bot.command()
+async def reorderq(ctx,a:int, b:int):
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel.")
+        return
+    
+    if not ctx.voice_client.is_playing():
+        await ctx.send("There's no music in queue.")
+        return
+    
+    if(a > len(Music_Queue.queue) or a <= 0 or b > len(Music_Queue.queue) or b <=0 or a == b):
+        await ctx.send("Invalid options.")
+    
+    a = a -1
+    b = b -1
+    temptitle = Music_Queue.queue[a]['title']
+    tempurl = Music_Queue.queue[a]['url']
+    Music_Queue.queue[a]['title'] = Music_Queue.queue[b]['title']
+    Music_Queue.queue[a]['url'] = Music_Queue.queue[b]['url']
+    Music_Queue.queue[b]['title'] = temptitle
+    Music_Queue.queue[b]['url'] = tempurl
+    
+    await ctx.send("Queue has been reordered.")
+    await Music_Queue.printqueue(ctx)
+
+@bot.command()
+async def pause(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel💢")
+        return
+    
+    if ctx.voice_client is None:
+        await ctx.send("I'm not connected to a voice channel💢")
+        return
+    
+    if not ctx.voice_client.is_playing():
+        await ctx.send("There's no music playing currently💢")
+        return
+    
+    await ctx.send("Paused⌛")
+    ctx.voice_client.pause()
+
+@bot.command()
+async def resume(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel💢")
+        return
+    
+    if ctx.voice_client is None:
+        await ctx.send("I'm not connected to a voice channel💢")
+        return
+    
+    if ctx.voice_client.is_playing():
+        await ctx.send("There is music playing already💢")
+        return
+    
+    await ctx.send("Resumed⏳")
+    ctx.voice_client.resume()
+
+@bot.command()
+async def clearq(ctx):
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel💢")
+        return
+    
+    if ctx.voice_client is None:
+        await ctx.send("I'm not connected to a voice channel💢")
+        return
+    
+    if len(Music_Queue.queue) == 0:
+        await ctx.send("The queue is empty already")
+    
+    await ctx.send("Queue cleared.")
+    Music_Queue.clear()
+    
 bot.run(BOT_TOKEN)
+
