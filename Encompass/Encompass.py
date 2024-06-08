@@ -76,9 +76,9 @@ class MusicQueue:
         self.queue =[]
     
     #Adding functions of a queue
-    async def enqueue(self,url:str):
+    async def enqueue(self,url:str,requester, is_dj = False):
         player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
-        self.queue.append(player)
+        self.queue.append({"player" : player, "requester": requester, "is_dj":is_dj})
 
     def dequeue(self):
         if not self.is_empty():
@@ -99,7 +99,8 @@ class MusicQueue:
         counter = 1
         if not self.is_empty():
             await ctx.send("Songs in Queue\n")
-            for player in self.queue:
+            for item in self.queue:
+                player = item["player"] 
                 await ctx.send(f"{counter}: {player.title}")
                 counter +=1
         else:
@@ -164,6 +165,11 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
         #cls creates another instance of YTDLSource, and this time, it passes the source - the ffmpeg audio source. it also passes data, which is after * so we must do data = data
         return cls(discord.FFmpegPCMAudio(filename, executable=ffmpeg_path, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn"), data=data)
 
+#Easy to convert seconds to minutes
+def format_duration(seconds):
+    minutes, seconds = divmod(seconds, 60)
+    return f"{minutes}:{seconds:02d}"
+
 @bot.command()
 async def play(ctx,*, url:str):
     #Checks if the user is in a VC
@@ -175,20 +181,38 @@ async def play(ctx,*, url:str):
         await channel.connect()
 
     #Add the song to a queue
-    await Music_Queue.enqueue(url)
-    await ctx.send("Added to queue.")
+    await Music_Queue.enqueue(url,ctx.author,is_dj = False)
+    if(len(Music_Queue.queue) > 1 or ctx.voice_client.is_playing()):
+        await ctx.send("Added to queue.")
+    
     
     #keeps playing the next song in queue
     if not ctx.voice_client.is_playing():
         await playnext(ctx)
 
 async def playnext(ctx):
+    if ctx.voice_client.is_paused():
+        return
+    
     if Music_Queue.is_empty():
         await ctx.send("The queue is empty.")
         return
     
-    player = Music_Queue.dequeue()
+    item= Music_Queue.dequeue()
+    player = item["player"]
+    requester = item["requester"]
+    is_dj = item["is_dj"]
     ctx.voice_client.play(player, after=lambda e: bot.loop.create_task(playnext(ctx)))
+    
+    #Embedding discord messages to make it look more aesthetic
+    embed = discord.Embed(title = "**Now Playing**", color = discord.Color.blue())
+    embed.title = "Now Playing"
+    embed.add_field(name = "Title", value = player.title, inline = False)
+    duration = f"`{format_duration(player.data.get('duration','Unknown Duration'))}`"
+    embed.add_field(name = "Duration", value = duration, inline = False)
+    embed.add_field(name="Recommender", value = bot.user.mention if is_dj else requester.mention,inline = False)
+    await ctx.send(embed=embed)
+    
     
     await ctx.send(f"Now playing: {player.title}")
 
@@ -273,8 +297,11 @@ async def resume(ctx):
         await ctx.send("There is music playing already💢")
         return
     
-    await ctx.send("Resumed⏳")
-    ctx.voice_client.resume()
+    if ctx.voice_client.is_paused():
+        ctx.voice_client.resume()
+        await ctx.send("Resumed⏳")
+    else:
+        await ctx.send("No music is paused currently💢")
 
 @bot.command()
 async def clearq(ctx):
@@ -287,10 +314,119 @@ async def clearq(ctx):
         return
     
     if len(Music_Queue.queue) == 0:
-        await ctx.send("The queue is empty already")
+        await ctx.send("The queue is empty already💢")
     
     await ctx.send("Queue cleared.")
     Music_Queue.clear()
-    
-bot.run(BOT_TOKEN)
 
+@bot.command()
+async def dj(ctx, *, genre:str):
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel💢")
+        return
+    
+    if ctx.voice_client is None:
+        channel = ctx.author.voice.channel
+        await channel.connect()
+    
+    await ctx.send(f"DJ Mode on! bum-da-bum-tss 🎧\nSetting up... This will only take a moment...")
+    
+    
+    playlists = await search_youtube_playlist(genre)
+    if not playlists:
+        await ctx.send("Oops... No playlists found, try to tweak your search a little!")
+        return
+    
+    all_songs = []
+    initial_songs = []
+    remaining_songs = []
+    songs = []
+    played_songs = set() #automatic no duplicates, unordered and customizable
+    
+    selected_playlist = random.choice(playlists)
+    all_songs = await get_playlist_songs(selected_playlist, set())
+    random.shuffle(all_songs)
+    
+    if not all_songs:
+        await ctx.send("No songs found in the playlists.")
+        return
+    
+    #Enqueue the first 25 songs
+    initial_songs = all_songs[:5]
+    await asyncio.gather(*[Music_Queue.enqueue(song['url'], bot.user, is_dj=True) for song in initial_songs])
+
+    
+    remaining_songs = all_songs[5:]
+    await ctx.send("Done setting up! Let's start jamming 🕺💃")
+    await playnext(ctx)
+    enqueue_remaining_songs.start(ctx, remaining_songs,played_songs, genre)
+  
+#This function is needed because from_url function is used for individual videos    
+async def search_youtube_playlist(genre):
+    search_query = f"top {genre} hits playlist"
+    request = youtube.search().list(
+        q = search_query,
+        part = "snippet", #only need the title, duration, etc.
+        type = "playlist",
+        maxResults = 2
+    )
+    
+    response = await asyncio.to_thread(request.execute) #async required so it doesn't block
+    
+    playlists = []
+    #making a playlistID List
+    if response['items']:
+        for item in response['items']:
+            playlist_id = item['id']['playlistId']
+            playlist_request = youtube.playlists().list(
+                part = "contentDetails",
+                id = playlist_id
+            )
+            playlist_response = await asyncio.to_thread(playlist_request.execute)
+            item_count = playlist_response['items'][0]['contentDetails']['itemCount']
+            if item_count >= 50:
+                playlists.append(playlist_id)
+
+    return playlists
+
+async def get_playlist_songs(playlist_id, played_songs):
+    songs = []
+    next_page_token = None
+    while True:
+        request = youtube.playlistItems().list(
+            playlistId=playlist_id,
+            part="snippet",
+            maxResults=25,  #number of songs to fetch per request
+            pageToken=next_page_token
+        )
+        response = await asyncio.to_thread(request.execute)
+        for item in response['items']:
+            video_id = item['snippet']['resourceId']['videoId']
+            if video_id not in played_songs:
+                songs.append({
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "title": item['snippet']['title']
+                })
+        
+        next_page_token = response.get('nextPageToken')
+        if not next_page_token:
+            break
+    return songs
+
+@tasks.loop(seconds = 1)
+async def enqueue_remaining_songs(ctx,remaining_songs, played_songs, genre):
+    if ctx.voice_client.is_paused():
+        return
+    while len(Music_Queue.queue) < 5 and remaining_songs:
+        next_song = remaining_songs.pop(0)
+        await Music_Queue.enqueue(next_song['url'],bot.user,is_dj = True)
+    
+    if not ctx.voice_client.is_playing() and not Music_Queue.is_empty():
+        await playnext(ctx)
+    
+    if len(remaining_songs) == 0 and len(Music_Queue.queue) == 0:
+        await ctx.send("That's it for this jam session! Want to start another one? You know what to do!😉")
+        enqueue_remaining_songs.stop()
+               
+            
+bot.run(BOT_TOKEN)
