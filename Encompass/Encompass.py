@@ -8,15 +8,17 @@ import random
 import asyncio
 import re
 from googleapiclient.discovery import build
+import matplotlib.pyplot as plt
+
 
 
 ################################## SET UP ###############################################
 BOT_TOKEN = "ENTER BOT TOKEN HERE"
-CHANNEL_ID = "ENTER CHANNEL ID HERE"
+CHANNEL_ID = ENTER CHANNEL ID HERE
 WATER_REMINDER_MINUTES = 30
 YOUTUBE_API_KEY = "ENTER YOUTUBE API KEY HERE"
 
-bot = commands.Bot(command_prefix ="/", intents=discord.Intents.all())
+bot = commands.Bot(command_prefix ="!", intents=discord.Intents.all())
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
 
@@ -77,9 +79,12 @@ class MusicQueue:
     
     #Adding functions of a queue
     async def enqueue(self,url:str,requester, is_dj = False):
-        player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
-        self.queue.append({"player" : player, "requester": requester, "is_dj":is_dj})
-
+        try:
+            player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
+            self.queue.append({"player" : player, "requester": requester, "is_dj":is_dj})
+        except:
+            pass
+        
     def dequeue(self):
         if not self.is_empty():
             return self.queue.pop(0)
@@ -107,7 +112,6 @@ class MusicQueue:
             await ctx.send("The queue is empty.")
 
 Music_Queue = MusicQueue()
-
 ffmpeg_path = "C:/ffmpeg/bin/ffmpeg.exe" 
 
 ytdl_format_options = {
@@ -132,7 +136,7 @@ ffmpeg_options = {
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options) #YoutubeDL is a class within discord.py, passes in formatting options for the youtube vid
 
 class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is a superclass here, making YTDL the subclass, hence super init allows us to use the init in the superclass
-    def __init__(self, source, *, data, volume=0.5): 
+    def __init__(self, source, *, data, youtube_url,volume=0.5): 
         # * means that when calling the function, any variable after * must be specified as keyword arguments: e.g. my_function(c=3) instead of my_function(3)
         
         super().__init__(source, volume) #Calling the init function from the superclass
@@ -141,6 +145,7 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
 
         self.title = data.get('title')
         self.url = data.get('url')
+        self.youtube_url = youtube_url
 
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False): #cls is similar to ctx, just context arguments
@@ -152,7 +157,11 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
         if re.match(r'^https?://(?:www\.)?youtube\.com/watch\?v=', url):
             data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
         else:
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f'{url}', download=not stream))
+            search_result = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{url}", download=False))
+            if search_result and 'entries' in search_result:
+                url = search_result['entries'][0]['webpage_url']
+                data = search_result['entries'][0]
+            #data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f'{url}', download=not stream))
 
         #Structure for 'data' for a playlist contains 'entries', so this is to check if we want to stream a playlist or a single video
         if 'entries' in data:
@@ -163,32 +172,158 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         
         #cls creates another instance of YTDLSource, and this time, it passes the source - the ffmpeg audio source. it also passes data, which is after * so we must do data = data
-        return cls(discord.FFmpegPCMAudio(filename, executable=ffmpeg_path, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn"), data=data)
+        return cls(discord.FFmpegPCMAudio(filename, executable=ffmpeg_path, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn"), data=data, youtube_url = url)
 
 #Easy to convert seconds to minutes
 def format_duration(seconds):
     minutes, seconds = divmod(seconds, 60)
     return f"{minutes}:{seconds:02d}"
 
+#obtain playlist ID from url
+def extract_playlist_id(url):
+    query = url.split("?")[1]
+    params = query.split("&")
+    for param in params:
+        if param.startswith("list="):
+            return param.split("=")[1]
+    return None
+
+##########################################################################################################
+#################This section is to handle the music in queue#############################################
+async def enqueueremainingsongs_base(ctx,remaining_songs):
+    print("0")
+    if ctx.voice_client.is_paused():
+        return
+    
+    while len(Music_Queue.queue) < 5 and remaining_songs:
+        next_song = remaining_songs.pop(0)
+        await Music_Queue.enqueue(next_song['url'],bot.user,is_dj = True)
+        print("1")
+    
+    if not ctx.voice_client.is_playing() and not Music_Queue.is_empty():
+        await playnext(ctx)
+        print("2")
+    
+    if len(remaining_songs) == 0 and Music_Queue.is_empty():
+        await ctx.send("That's it for this jam session! Want to start another one? You know what to do!😉")
+        enqueue_remaining_songs.stop()
+        
+started_tasks =[]
+def enqueue_remaining_songs(ctx, remaining_songs):
+    task = tasks.loop(seconds=1)(enqueueremainingsongs_base)
+    started_tasks.append(task)
+    task.start(ctx, remaining_songs)               
+
+def stoptask():
+    for t in started_tasks:
+        t.cancel()
+########################################################################################################
+
+#This function is needed because from_url function is used for individual videos    
+async def search_youtube_playlist(genre):
+    search_query = f"top {genre} hits playlist"
+    request = youtube.search().list(
+        q = search_query,
+        part = "snippet", #only need the title, duration, etc.
+        type = "playlist",
+        maxResults = 2
+    )
+    
+    response = await asyncio.to_thread(request.execute) #async required so it doesn't block
+    
+    playlists = []
+    #making a playlistID List
+    if response['items']:
+        for item in response['items']:
+            playlist_id = item['id']['playlistId']
+            playlist_request = youtube.playlists().list(
+                part = "contentDetails",
+                id = playlist_id
+            )
+            playlist_response = await asyncio.to_thread(playlist_request.execute)
+            item_count = playlist_response['items'][0]['contentDetails']['itemCount']
+            if item_count >= 50:
+                playlists.append(playlist_id)
+
+    return playlists
+
+async def get_playlist_songs(playlist_id):
+    songs = []
+    next_page_token = None
+    while True:
+        request = youtube.playlistItems().list(
+            playlistId=playlist_id,
+            part="snippet",
+            maxResults=25,  #number of songs to fetch per request
+            pageToken=next_page_token
+        )
+        response = await asyncio.to_thread(request.execute)
+        for item in response['items']:
+            video_id = item['snippet']['resourceId']['videoId']
+            songs.append({
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "title": item['snippet']['title']
+            })    
+        next_page_token = response.get('nextPageToken')
+        if not next_page_token:
+            break
+    return songs
+
+
+
 @bot.command()
 async def play(ctx,*, url:str):
     #Checks if the user is in a VC
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel.")
+        return
     
     channel = ctx.author.voice.channel
     if ctx.voice_client is None: #If the bot is currently connected to a voice channel
         await channel.connect()
+        
+    is_playlist = "playlist" in url
 
     #Add the song to a queue
-    await Music_Queue.enqueue(url,ctx.author,is_dj = False)
-    if(len(Music_Queue.queue) > 1 or ctx.voice_client.is_playing()):
-        await ctx.send("Added to queue.")
-    
-    
-    #keeps playing the next song in queue
-    if not ctx.voice_client.is_playing():
-        await playnext(ctx)
+    if is_playlist:
+        stoptask()
+        if ctx.voice_client.is_playing():
+            Music_Queue.queue = []
+            ctx.voice_client.stop()
+            
+        if ctx.voice_client is None: #If the bot is currently connected to a voice channel
+            await channel.connect()
+        playlist_id = extract_playlist_id(url)
+        all_songs = await get_playlist_songs(playlist_id)
+        print("length of all songs: "+ str(len(all_songs)))
+        if not all_songs:
+            await ctx.send("No songs found in the playlist.")
+            return
+        await ctx.send("Loading playlist...")
+        if len(all_songs) <= 5:
+            for song in all_songs:
+                await Music_Queue.enqueue(song['url'],ctx.author,is_dj = False)
+        else:
+            initial_songs = all_songs[:5]
+            remaining_songs = all_songs[5:]
+            if Music_Queue.is_empty():
+                for song in initial_songs:
+                    await Music_Queue.enqueue(song['url'], ctx.author, is_dj=False)
+                #await asyncio.gather(*[Music_Queue.enqueue(song['url'], ctx.author, is_dj=False) for song in initial_songs])
+                await ctx.send("Loaded playlist!")
+                await playnext(ctx)
+                
+            # Start the task to enqueue remaining songs
+            enqueue_remaining_songs(ctx, remaining_songs)
+    else:
+        if(len(Music_Queue.queue) > 1 or ctx.voice_client.is_playing()):
+            await Music_Queue.enqueue(url,ctx.author,is_dj = False)
+            await ctx.send("Added to queue.")
+        else:
+            if Music_Queue.is_empty():
+                await Music_Queue.enqueue(url,ctx.author,is_dj = False)
+                await playnext(ctx)
+
 
 async def playnext(ctx):
     if ctx.voice_client.is_paused():
@@ -211,10 +346,12 @@ async def playnext(ctx):
     duration = f"`{format_duration(player.data.get('duration','Unknown Duration'))}`"
     embed.add_field(name = "Duration", value = duration, inline = False)
     embed.add_field(name="Recommender", value = bot.user.mention if is_dj else requester.mention,inline = False)
+    url = player.youtube_url if len(player.youtube_url) <= 1024 else player.youtube_url[:1021] + "..."
+    embed.add_field(name="URL", value = url, inline = False)
+    if 'thumbnail' in player.data:
+        embed.set_thumbnail(url = player.data['thumbnail'])
     await ctx.send(embed=embed)
     
-    
-    await ctx.send(f"Now playing: {player.title}")
 
 @bot.command()
 async def skip(ctx):
@@ -228,6 +365,12 @@ async def skip(ctx):
     
     ctx.voice_client.stop() #playnext(ctx) will automatically be called as it is set as the "after" callback
     await ctx.send("Song skipped")
+
+@bot.command()
+async def kill(ctx):
+    stoptask()
+    await clearq(ctx)
+    await skip(ctx)
 
 @bot.command()
 async def queue(ctx):
@@ -331,6 +474,8 @@ async def dj(ctx, *, genre:str):
     
     await ctx.send(f"DJ Mode on! bum-da-bum-tss 🎧\nSetting up... This will only take a moment...")
     
+    if ctx.voice_client.is_playing() or len(Music_Queue.queue) != 0:
+        await kill(ctx)    
     
     playlists = await search_youtube_playlist(genre)
     if not playlists:
@@ -340,93 +485,89 @@ async def dj(ctx, *, genre:str):
     all_songs = []
     initial_songs = []
     remaining_songs = []
-    songs = []
-    played_songs = set() #automatic no duplicates, unordered and customizable
     
     selected_playlist = random.choice(playlists)
-    all_songs = await get_playlist_songs(selected_playlist, set())
+    all_songs = await get_playlist_songs(selected_playlist)
     random.shuffle(all_songs)
     
     if not all_songs:
         await ctx.send("No songs found in the playlists.")
         return
     
-    #Enqueue the first 25 songs
+    #Enqueue the first 5 songs
     initial_songs = all_songs[:5]
-    await asyncio.gather(*[Music_Queue.enqueue(song['url'], bot.user, is_dj=True) for song in initial_songs])
+    for song in initial_songs:
+        await Music_Queue.enqueue(song['url'], ctx.author, is_dj=False)
 
     
     remaining_songs = all_songs[5:]
     await ctx.send("Done setting up! Let's start jamming 🕺💃")
     await playnext(ctx)
-    enqueue_remaining_songs.start(ctx, remaining_songs,played_songs, genre)
+    enqueue_remaining_songs(ctx, remaining_songs)
   
-#This function is needed because from_url function is used for individual videos    
-async def search_youtube_playlist(genre):
-    search_query = f"top {genre} hits playlist"
-    request = youtube.search().list(
-        q = search_query,
-        part = "snippet", #only need the title, duration, etc.
-        type = "playlist",
-        maxResults = 2
-    )
-    
-    response = await asyncio.to_thread(request.execute) #async required so it doesn't block
-    
-    playlists = []
-    #making a playlistID List
-    if response['items']:
-        for item in response['items']:
-            playlist_id = item['id']['playlistId']
-            playlist_request = youtube.playlists().list(
-                part = "contentDetails",
-                id = playlist_id
-            )
-            playlist_response = await asyncio.to_thread(playlist_request.execute)
-            item_count = playlist_response['items'][0]['contentDetails']['itemCount']
-            if item_count >= 50:
-                playlists.append(playlist_id)
+######################## EQUALIZER ############################################
 
-    return playlists
+#set all frequency to 0 as the default (default mode)
+equalizer_settings = {
+    '32Hz': 0,
+    '64Hz': 0,
+    '125Hz': 0,
+    '250Hz': 0,
+    '500Hz': 0,
+    '1kHz': 0,
+    '2kHz': 0,
+    '4kHz': 0,
+    '8kHz': 0,
+    '16kHz': 0
+}
 
-async def get_playlist_songs(playlist_id, played_songs):
-    songs = []
-    next_page_token = None
-    while True:
-        request = youtube.playlistItems().list(
-            playlistId=playlist_id,
-            part="snippet",
-            maxResults=25,  #number of songs to fetch per request
-            pageToken=next_page_token
-        )
-        response = await asyncio.to_thread(request.execute)
-        for item in response['items']:
-            video_id = item['snippet']['resourceId']['videoId']
-            if video_id not in played_songs:
-                songs.append({
-                    "url": f"https://www.youtube.com/watch?v={video_id}",
-                    "title": item['snippet']['title']
-                })
-        
-        next_page_token = response.get('nextPageToken')
-        if not next_page_token:
-            break
-    return songs
+def generate_equalizer_graph(settings):
+    frequencies = list(settings.keys()) #all the frequencies from equalizer_settings
+    values = list(settings.values()) #all the values from equalizer_settings
 
-@tasks.loop(seconds = 1)
-async def enqueue_remaining_songs(ctx,remaining_songs, played_songs, genre):
-    if ctx.voice_client.is_paused():
-        return
-    while len(Music_Queue.queue) < 5 and remaining_songs:
-        next_song = remaining_songs.pop(0)
-        await Music_Queue.enqueue(next_song['url'],bot.user,is_dj = True)
-    
-    if not ctx.voice_client.is_playing() and not Music_Queue.is_empty():
-        await playnext(ctx)
-    
-    if len(remaining_songs) == 0 and len(Music_Queue.queue) == 0:
-        await ctx.send("That's it for this jam session! Want to start another one? You know what to do!😉")
-        enqueue_remaining_songs.stop()
-               
-            
+    plt.figure(figsize=(10, 4))
+    plt.plot(frequencies, values, marker='o', linestyle='-')
+    plt.title('Equalizer')
+    plt.xlabel('Frequency')
+    plt.ylabel('Gain')
+    plt.ylim(-10, 10) #min and max is 10
+
+    plt.savefig('equalizer.png')
+    plt.close()
+
+@bot.command()
+async def eq(ctx):
+    generate_equalizer_graph(equalizer_settings)
+    await ctx.send(file=discord.File('equalizer.png'))
+
+@bot.command()
+async def eqset(ctx, frequency: str, value: int):
+    if frequency in equalizer_settings and -10 <= value <= 10:
+        equalizer_settings[frequency] = value
+        await ctx.send(f"Set {frequency} to {value}")
+        generate_equalizer_graph(equalizer_settings)
+        await ctx.send(file=discord.File('equalizer.png'))
+    else:
+        await ctx.send("Invalid frequency or value. Please ensure the frequency is valid and the value is between -10 and 10.")
+
+@bot.command()
+async def equp(ctx, frequency:str):
+    if frequency in equalizer_settings:
+        equalizer_settings[frequency] += 1
+        await ctx.send(f"Increased {frequency} to {equalizer_settings[frequency]}")
+        generate_equalizer_graph(equalizer_settings)
+        await ctx.send(file = discord.File('equalizer.png'))
+    else:
+        await ctx.send("Invalid frequency or value is already at maximum (10)")
+
+@bot.command()
+async def eqdown(ctx, frequency:str):
+    if frequency in equalizer_settings:
+        equalizer_settings[frequency] -= 1
+        await ctx.send(f"Decreased {frequency} to {equalizer_settings[frequency]}")
+        generate_equalizer_graph(equalizer_settings)
+        await ctx.send(file = discord.File('equalizer.png'))
+    else:
+        await ctx.send("Invalid frequency or value is already at maximum (10)")
+
 bot.run(BOT_TOKEN)
