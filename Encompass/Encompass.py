@@ -22,7 +22,7 @@ bot = commands.Bot(command_prefix ="!", intents=discord.Intents.all())
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
 
-@bot.event #decorator that takes the function "on_ready"
+bot.event #decorator that takes the function "on_ready"
 async def on_ready():
     welcome_messages = [
     "I'm ALIVEEEEEEEEEEE!",
@@ -81,7 +81,7 @@ class MusicQueue:
     async def enqueue(self,url:str,requester, is_dj = False):
         try:
             player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
-            self.queue.append({"player" : player, "requester": requester, "is_dj":is_dj})
+            self.queue.append({"player" : player, "requester": requester, "is_dj":is_dj, "title": player.title, "url": player.youtube_url})
         except:
             pass
         
@@ -161,8 +161,7 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
             if search_result and 'entries' in search_result:
                 url = search_result['entries'][0]['webpage_url']
                 data = search_result['entries'][0]
-            #data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f'{url}', download=not stream))
-
+                
         #Structure for 'data' for a playlist contains 'entries', so this is to check if we want to stream a playlist or a single video
         if 'entries' in data:
             # take first item from a playlist
@@ -171,8 +170,23 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
         #if stream is true, filenam is set to the url, if not, get the filename of the video to download it
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         
+        #Apply equalizer settings
+        eq_filters = generate_equalizer_filters(equalizer_settings)
+        
+        ffmpeg_options = {
+            'executable': ffmpeg_path,
+            'before_options': "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+            'options': f'-vn -af "{eq_filters}"'
+        }
         #cls creates another instance of YTDLSource, and this time, it passes the source - the ffmpeg audio source. it also passes data, which is after * so we must do data = data
-        return cls(discord.FFmpegPCMAudio(filename, executable=ffmpeg_path, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5", options="-vn"), data=data, youtube_url = url)
+        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data, youtube_url=url)
+
+def generate_equalizer_filters(settings):
+    frequencies = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    filters = []
+    for freq, gain in zip(frequencies, list(settings.values())):
+        filters.append(f"equalizer=f={freq}:width_type=o:width=2:g={gain}")
+    return ",".join(filters)
 
 #Easy to convert seconds to minutes
 def format_duration(seconds):
@@ -191,14 +205,12 @@ def extract_playlist_id(url):
 ##########################################################################################################
 #################This section is to handle the music in queue#############################################
 async def enqueueremainingsongs_base(ctx,remaining_songs):
-    print("0")
     if ctx.voice_client.is_paused():
         return
     
     while len(Music_Queue.queue) < 5 and remaining_songs:
         next_song = remaining_songs.pop(0)
         await Music_Queue.enqueue(next_song['url'],bot.user,is_dj = True)
-        print("1")
     
     if not ctx.voice_client.is_playing() and not Music_Queue.is_empty():
         await playnext(ctx)
@@ -210,7 +222,7 @@ async def enqueueremainingsongs_base(ctx,remaining_songs):
         
 started_tasks =[]
 def enqueue_remaining_songs(ctx, remaining_songs):
-    task = tasks.loop(seconds=1)(enqueueremainingsongs_base)
+    task = tasks.loop(seconds=0.01)(enqueueremainingsongs_base)
     started_tasks.append(task)
     task.start(ctx, remaining_songs)               
 
@@ -219,6 +231,31 @@ def stoptask():
         t.cancel()
 ########################################################################################################
 
+#reset the song after equalizing
+async def update_playback(ctx):
+    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        current_source = ctx.voice_client.source
+        if hasattr(current_source, 'data'):
+            current_url = current_source.youtube_url
+            current_title = current_source.title
+            current_duration = current_source.data.get('duration', 'Unknown Duration')
+            current_thumbnail = current_source.data.get('thumbnail')
+            is_dj = current_source.data.get('is_dj', False)
+            requester = current_source.data.get('requester', ctx.author)
+            player = await YTDLSource.from_url(current_url, loop=bot.loop, stream=True)
+            ctx.voice_client.stop()
+            ctx.voice_client.play(player, after=lambda e: bot.loop.create_task(playnext(ctx)))
+            embed = discord.Embed(title = "**Now Playing**", color = discord.Color.blue())
+            embed.add_field(name = "Title", value = current_title, inline = False)
+            duration = f"`{format_duration(current_duration)}`"
+            embed.add_field(name = "Duration", value = duration, inline = False)
+            embed.add_field(name="Recommender", value = bot.user.mention if is_dj else requester.mention, inline = False)
+            url = current_url if len(current_url) <= 1024 else current_url[:1021] + "..."
+            embed.add_field(name="URL", value = url, inline = False)
+            if current_thumbnail:
+                embed.set_thumbnail(url = current_thumbnail)
+            await ctx.send(embed=embed)
+
 #This function is needed because from_url function is used for individual videos    
 async def search_youtube_playlist(genre):
     search_query = f"top {genre} hits playlist"
@@ -226,7 +263,7 @@ async def search_youtube_playlist(genre):
         q = search_query,
         part = "snippet", #only need the title, duration, etc.
         type = "playlist",
-        maxResults = 2
+        maxResults = 1
     )
     
     response = await asyncio.to_thread(request.execute) #async required so it doesn't block
@@ -241,6 +278,8 @@ async def search_youtube_playlist(genre):
                 id = playlist_id
             )
             playlist_response = await asyncio.to_thread(playlist_request.execute)
+            playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+            print(playlist_url)
             item_count = playlist_response['items'][0]['contentDetails']['itemCount']
             if item_count >= 50:
                 playlists.append(playlist_id)
@@ -271,8 +310,11 @@ async def get_playlist_songs(playlist_id):
 
 
 
-@bot.command()
-async def play(ctx,*, url:str):
+@bot.command(help = "Plays a song, queues it instead if there is a song playing. Format: !play <URL/string/playlist URL>", aliases = ['p','P'])
+async def play(ctx,*, url:str = commands.parameter(default = None,description = ": URL/string/playlist URL")):
+    if url is None:
+        await ctx.send("Enter something...!!!")
+        return
     #Checks if the user is in a VC
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel.")
@@ -281,7 +323,7 @@ async def play(ctx,*, url:str):
     channel = ctx.author.voice.channel
     if ctx.voice_client is None: #If the bot is currently connected to a voice channel
         await channel.connect()
-        
+    
     is_playlist = "playlist" in url
 
     #Add the song to a queue
@@ -303,13 +345,14 @@ async def play(ctx,*, url:str):
         if len(all_songs) <= 5:
             for song in all_songs:
                 await Music_Queue.enqueue(song['url'],ctx.author,is_dj = False)
+            await ctx.send("Loaded playlist!")
+            await playnext(ctx)
         else:
             initial_songs = all_songs[:5]
             remaining_songs = all_songs[5:]
             if Music_Queue.is_empty():
                 for song in initial_songs:
                     await Music_Queue.enqueue(song['url'], ctx.author, is_dj=False)
-                #await asyncio.gather(*[Music_Queue.enqueue(song['url'], ctx.author, is_dj=False) for song in initial_songs])
                 await ctx.send("Loaded playlist!")
                 await playnext(ctx)
                 
@@ -330,7 +373,6 @@ async def playnext(ctx):
         return
     
     if Music_Queue.is_empty():
-        await ctx.send("The queue is empty.")
         return
     
     item= Music_Queue.dequeue()
@@ -353,26 +395,40 @@ async def playnext(ctx):
     await ctx.send(embed=embed)
     
 
-@bot.command()
+@bot.command(help = "Skips the current song")
 async def skip(ctx):
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel.")
         return
     
     if not ctx.voice_client.is_playing():
-        await ctx.send("There's no music in queue.")
+        await ctx.send("There's no music playing.")
         return
     
     ctx.voice_client.stop() #playnext(ctx) will automatically be called as it is set as the "after" callback
-    await ctx.send("Song skipped")
+    await ctx.send("Song skipped.")
 
-@bot.command()
+@bot.command(help = "Kills the current music session", aliases = ['end'])
 async def kill(ctx):
-    stoptask()
-    await clearq(ctx)
-    await skip(ctx)
+    for t in started_tasks:
+        t.cancel()
+    if ctx.author.voice is None:
+        await ctx.send("You're not in a voice channel💢")
+        return
+    
+    if ctx.voice_client is None:
+        await ctx.send("I'm not connected to a voice channel💢")
+        return
+    
+    if not ctx.voice_client.is_playing():
+        await ctx.send("There's no music playing💢")
+        return
+    
+    Music_Queue.clear()
+    ctx.voice_client.stop() #playnext(ctx) will automatically be called as it is set as the "after" callback
+    await ctx.send("Killed the current session.")
 
-@bot.command()
+@bot.command(help = "Shows the current queue", aliases = ['q', 'Q'])
 async def queue(ctx):
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel.")
@@ -384,8 +440,9 @@ async def queue(ctx):
     
     await Music_Queue.printqueue(ctx)
 
-@bot.command()
-async def reorderq(ctx,a:int, b:int):
+@bot.command(help = "Switches two items in the queue. Format: <reorderq> <item 1> <item 2>")
+async def reorderq(ctx,a:int = commands.parameter(default = None,description = ": First queue item to reorder."), b:int = commands.parameter(default = None,description = ": Second queue item to reorder.")):
+
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel.")
         return
@@ -394,22 +451,17 @@ async def reorderq(ctx,a:int, b:int):
         await ctx.send("There's no music in queue.")
         return
     
-    if(a > len(Music_Queue.queue) or a <= 0 or b > len(Music_Queue.queue) or b <=0 or a == b):
+    if(a > len(Music_Queue.queue) or a <= 0 or b > len(Music_Queue.queue) or b <=0 or a == b or a is None or b is None):
         await ctx.send("Invalid options.")
     
-    a = a -1
-    b = b -1
-    temptitle = Music_Queue.queue[a]['title']
-    tempurl = Music_Queue.queue[a]['url']
-    Music_Queue.queue[a]['title'] = Music_Queue.queue[b]['title']
-    Music_Queue.queue[a]['url'] = Music_Queue.queue[b]['url']
-    Music_Queue.queue[b]['title'] = temptitle
-    Music_Queue.queue[b]['url'] = tempurl
+    a -=1
+    b -=1
+    Music_Queue.queue[a], Music_Queue.queue[b] = Music_Queue.queue[b], Music_Queue.queue[a]
     
     await ctx.send("Queue has been reordered.")
     await Music_Queue.printqueue(ctx)
 
-@bot.command()
+@bot.command(help = "Pauses the current song")
 async def pause(ctx):
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel💢")
@@ -426,7 +478,7 @@ async def pause(ctx):
     await ctx.send("Paused⌛")
     ctx.voice_client.pause()
 
-@bot.command()
+@bot.command(help="Resumes the song", aliases = ['continue'])
 async def resume(ctx):
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel💢")
@@ -446,7 +498,7 @@ async def resume(ctx):
     else:
         await ctx.send("No music is paused currently💢")
 
-@bot.command()
+@bot.command(help="Clears the queue", aliases = ['cq'])
 async def clearq(ctx):
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel💢")
@@ -462,8 +514,11 @@ async def clearq(ctx):
     await ctx.send("Queue cleared.")
     Music_Queue.clear()
 
-@bot.command()
-async def dj(ctx, *, genre:str):
+@bot.command(help="Starts DJ mode. Format: !dj <whatever genre, artist, etc. you want>", aliases = ['jam', 'DJ'])
+async def dj(ctx, *, genre:str = commands.parameter(default = None, description=": Any genre/artist/string can be accepted. A playlist will be chosen from this and will be played.")):
+    if genre is None:
+        await ctx.send("Choose a genre please.")
+        return
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel💢")
         return
@@ -535,39 +590,74 @@ def generate_equalizer_graph(settings):
     plt.savefig('equalizer.png')
     plt.close()
 
-@bot.command()
+@bot.command(help="Displays the current equalizer settings.", aliases = ['equalizer'])
 async def eq(ctx):
     generate_equalizer_graph(equalizer_settings)
     await ctx.send(file=discord.File('equalizer.png'))
 
-@bot.command()
-async def eqset(ctx, frequency: str, value: int):
+@bot.command(help="Sets a value from -10 to 10 for a certain frequency. Format: !eqset <freq> <value>", aliases = ['seteq', 'set'])
+async def eqset(ctx, frequency: str = commands.parameter(default = None, description=": Frequency band to adjust (e.g., '32Hz', '64Hz')."), value: int = commands.parameter(default = None, description=": Value to set for the frequency band (-10 to 10).")):
+    if frequency is None or value is None:
+        await ctx.send("Invalid frequency or value. Please choose the right frequency and make sure your value is within range. Use !eq for more information.")
+        return
     if frequency in equalizer_settings and -10 <= value <= 10:
         equalizer_settings[frequency] = value
         await ctx.send(f"Set {frequency} to {value}")
         generate_equalizer_graph(equalizer_settings)
         await ctx.send(file=discord.File('equalizer.png'))
+        if ctx.voice_client.is_playing():
+            await update_playback(ctx)
+
     else:
         await ctx.send("Invalid frequency or value. Please ensure the frequency is valid and the value is between -10 and 10.")
 
-@bot.command()
-async def equp(ctx, frequency:str):
+@bot.command(help="Increases the value of a certain frequency by one. Format: !equp <freq>")
+async def equp(ctx, frequency: str = commands.parameter(default = None, description=": Frequency band to adjust (e.g., '32Hz', '64Hz').")):
+    if frequency is None:
+        await ctx.send("Please specify a frequency.")
+        return
     if frequency in equalizer_settings:
-        equalizer_settings[frequency] += 1
-        await ctx.send(f"Increased {frequency} to {equalizer_settings[frequency]}")
-        generate_equalizer_graph(equalizer_settings)
-        await ctx.send(file = discord.File('equalizer.png'))
+        if equalizer_settings[frequency] < 10:
+            equalizer_settings[frequency] += 1
+            await ctx.send(f"Increased {frequency} to {equalizer_settings[frequency]}")
+            generate_equalizer_graph(equalizer_settings)
+            await ctx.send(file = discord.File('equalizer.png'))
+            if ctx.voice_client.is_playing():
+                await update_playback(ctx)
+        else:
+            await ctx.send("Invalid frequency or value is already at maximum")
     else:
-        await ctx.send("Invalid frequency or value is already at maximum (10)")
+        await ctx.send("Invalid frequency or value is already at maximum")
 
-@bot.command()
-async def eqdown(ctx, frequency:str):
+
+@bot.command(help="Decreases the value of a certain frequency by one. Format: !eqdown <freq>")
+async def eqdown(ctx, frequency: str = commands.parameter(default = None, description=": Frequency band to adjust (e.g., '32Hz', '64Hz').")):
+    if frequency is None:
+        await ctx.send("Please specify a frequency.")
+        return
+    
     if frequency in equalizer_settings:
-        equalizer_settings[frequency] -= 1
-        await ctx.send(f"Decreased {frequency} to {equalizer_settings[frequency]}")
-        generate_equalizer_graph(equalizer_settings)
-        await ctx.send(file = discord.File('equalizer.png'))
+        if equalizer_settings[frequency] > -10:
+            equalizer_settings[frequency] -= 1
+            await ctx.send(f"Decreased {frequency} to {equalizer_settings[frequency]}")
+            generate_equalizer_graph(equalizer_settings)
+            await ctx.send(file = discord.File('equalizer.png'))
+            if ctx.voice_client.is_playing():
+                await update_playback(ctx)
+        else:
+            await ctx.send("Invalid frequency or value is already at minimum")
     else:
-        await ctx.send("Invalid frequency or value is already at maximum (10)")
+        await ctx.send("Invalid frequency or value is already at minimum")
+
+@bot.command(help="Resets the equalizer")
+async def eqreset(ctx):
+    for i in equalizer_settings:
+        equalizer_settings[i] = 0
+    await ctx.send("Equalizer settings resetted")
+    generate_equalizer_graph(equalizer_settings)
+    await ctx.send(file = discord.File('equalizer.png'))
+    if ctx.voice_client.is_playing():
+        await update_playback(ctx)
 
 bot.run(BOT_TOKEN)
+
