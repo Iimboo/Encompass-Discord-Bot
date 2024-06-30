@@ -22,7 +22,7 @@ bot = commands.Bot(command_prefix ="!", intents=discord.Intents.all())
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
 
-bot.event #decorator that takes the function "on_ready"
+@bot.event #decorator that takes the function "on_ready"
 async def on_ready():
     welcome_messages = [
     "I'm ALIVEEEEEEEEEEE!",
@@ -76,6 +76,7 @@ async def stopdrink(ctx):
 class MusicQueue:
     def __init__(self):
         self.queue =[]
+        self.repeat = False
     
     #Adding functions of a queue
     async def enqueue(self,url:str,requester, is_dj = False):
@@ -130,7 +131,7 @@ ytdl_format_options = {
 
 ffmpeg_options = {
     'executable': ffmpeg_path,
-    'options': '-vn' #Tells ffmpeg to skip video stream and process only the audio stream
+    'options': '-vn -filter:a "atempo=1.0"' #Tells ffmpeg to skip video stream and process only the audio stream
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options) #YoutubeDL is a class within discord.py, passes in formatting options for the youtube vid
@@ -176,7 +177,7 @@ class YTDLSource(discord.PCMVolumeTransformer): #discord.PCMVolumeTransformer is
         ffmpeg_options = {
             'executable': ffmpeg_path,
             'before_options': "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-            'options': f'-vn -af "{eq_filters}"'
+            'options': f'-vn -filter:a "atempo=1.0" -af "{eq_filters}"'
         }
         #cls creates another instance of YTDLSource, and this time, it passes the source - the ffmpeg audio source. it also passes data, which is after * so we must do data = data
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data, youtube_url=url)
@@ -205,16 +206,13 @@ def extract_playlist_id(url):
 ##########################################################################################################
 #################This section is to handle the music in queue#############################################
 async def enqueueremainingsongs_base(ctx,remaining_songs):
-    if ctx.voice_client.is_paused():
+    if ctx.voice_client.is_paused() or Music_Queue.repeat:
         return
     
     while len(Music_Queue.queue) < 5 and remaining_songs:
         next_song = remaining_songs.pop(0)
         await Music_Queue.enqueue(next_song['url'],bot.user,is_dj = True)
     
-    if not ctx.voice_client.is_playing() and not Music_Queue.is_empty():
-        await playnext(ctx)
-        print("2")
     
     if len(remaining_songs) == 0 and Music_Queue.is_empty():
         await ctx.send("That's it for this jam session! Want to start another one? You know what to do!😉")
@@ -308,13 +306,31 @@ async def get_playlist_songs(playlist_id):
             break
     return songs
 
-
-
+@bot.command(help="Shuffles current queue and the remaining playlist songs")
+async def shuffle(ctx):
+    if not ctx.voice_client.is_playing() or Music_Queue.is_empty():
+        await ctx.send("There's nothing to shuffle!")
+        return
+    if remaining_songs:
+        random.shuffle(remaining_songs)
+    random.shuffle(Music_Queue.queue)
+    await ctx.send("Shuffled!")
+    
+remaining_songs=[]
 @bot.command(help = "Plays a song, queues it instead if there is a song playing. Format: !play <URL/string/playlist URL>", aliases = ['p','P'])
-async def play(ctx,*, url:str = commands.parameter(default = None,description = ": URL/string/playlist URL")):
-    if url is None:
+async def play(ctx,*, args:str = commands.parameter(default=None, description=": URL/string/playlist URL and optionally 's' for shuffle")):
+            
+    if args is None:
         await ctx.send("Enter something...!!!")
         return
+    
+    args = args.split()
+    url = args[0]
+    shuffle = args[1] if len(args) > 1 and args[1] in ['s', 'S', 'shuffle'] else None
+    if (shuffle != 's' and 'S' and "shuffle" and None):
+        await ctx.send("Invalid shuffle option, use '!help play' to find out more.")
+        return
+    
     #Checks if the user is in a VC
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel.")
@@ -342,6 +358,9 @@ async def play(ctx,*, url:str = commands.parameter(default = None,description = 
             await ctx.send("No songs found in the playlist.")
             return
         await ctx.send("Loading playlist...")
+        if (shuffle == 's' or 'S' or "shuffle"):
+            random.shuffle(all_songs)
+            await ctx.send("Playlist will be shuffled.")
         if len(all_songs) <= 5:
             for song in all_songs:
                 await Music_Queue.enqueue(song['url'],ctx.author,is_dj = False)
@@ -368,6 +387,25 @@ async def play(ctx,*, url:str = commands.parameter(default = None,description = 
                 await playnext(ctx)
 
 
+@bot.command(help="Toggles repeat mode for the current song")
+async def repeat(ctx):
+    Music_Queue.repeat = not Music_Queue.repeat
+    if Music_Queue.repeat:
+        current_player = ctx.voice_client.source
+        if current_player:
+            current_url = current_player.youtube_url
+            current_requester = current_player.data.get('requester')
+            current_is_dj = current_player.data.get('is_dj', False)
+            await Music_Queue.enqueue(current_url, current_requester, current_is_dj)
+            Music_Queue.queue.insert(0, Music_Queue.queue.pop())
+        await ctx.send("Repeat mode is now ON🔁")
+    else:
+        await ctx.send("Repeat mode is now OFF🚫")
+        if ctx.voice_client.is_paused() or ctx.voice_client.is_playing():
+            #pop out the top song, enqueueremainingsongs will auto run and fill in the gaps
+            Music_Queue.dequeue()
+        
+repeatedurl = ""
 async def playnext(ctx):
     if ctx.voice_client.is_paused():
         return
@@ -376,7 +414,13 @@ async def playnext(ctx):
         return
     
     item= Music_Queue.dequeue()
+    if Music_Queue.repeat:
+        await Music_Queue.enqueue(item['url'], item['requester'], item['is_dj'])
+        Music_Queue.queue.insert(0, Music_Queue.queue.pop())
     player = item["player"]
+    if Music_Queue.repeat:
+        repeatedurl = player.youtube_url if len(player.youtube_url) <= 1024 else player.youtube_url[:1021] + "..."
+
     requester = item["requester"]
     is_dj = item["is_dj"]
     ctx.voice_client.play(player, after=lambda e: bot.loop.create_task(playnext(ctx)))
@@ -387,8 +431,14 @@ async def playnext(ctx):
     embed.add_field(name = "Title", value = player.title, inline = False)
     duration = f"`{format_duration(player.data.get('duration','Unknown Duration'))}`"
     embed.add_field(name = "Duration", value = duration, inline = False)
-    embed.add_field(name="Recommender", value = bot.user.mention if is_dj else requester.mention,inline = False)
-    url = player.youtube_url if len(player.youtube_url) <= 1024 else player.youtube_url[:1021] + "..."
+    if requester:
+        embed.add_field(name="Recommender", value = bot.user.mention if is_dj else requester.mention, inline = False)
+    else:
+        embed.add_field(name="Recommender", value = bot.user.mention, inline = False)
+    if Music_Queue.repeat:
+        url = repeatedurl
+    else:
+        url = player.youtube_url if len(player.youtube_url) <= 1024 else player.youtube_url[:1021] + "..."
     embed.add_field(name="URL", value = url, inline = False)
     if 'thumbnail' in player.data:
         embed.set_thumbnail(url = player.data['thumbnail'])
@@ -404,6 +454,9 @@ async def skip(ctx):
     if not ctx.voice_client.is_playing():
         await ctx.send("There's no music playing.")
         return
+    if Music_Queue.repeat:
+        Music_Queue.repeat = False
+        Music_Queue.dequeue()
     
     ctx.voice_client.stop() #playnext(ctx) will automatically be called as it is set as the "after" callback
     await ctx.send("Song skipped.")
@@ -434,7 +487,7 @@ async def queue(ctx):
         await ctx.send("You're not in a voice channel.")
         return
     
-    if not ctx.voice_client.is_playing():
+    if not ctx.voice_client.is_playing() and len(Music_Queue.queue) == 0:
         await ctx.send("There's no music in queue.")
         return
     
@@ -660,4 +713,5 @@ async def eqreset(ctx):
         await update_playback(ctx)
 
 bot.run(BOT_TOKEN)
+
 
