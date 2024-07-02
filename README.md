@@ -51,6 +51,7 @@ The Discord bot token and YouTube API key and Channel ID are essential for the c
 
 - Windows Operating System
 - Administrator privileges
+- At Least Python 3.11 and Above
 
 ## Installation
 
