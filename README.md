@@ -71,7 +71,7 @@ The Discord bot token and YouTube API key and Channel ID are essential for the c
 5. In the Edit Environment Variable window, click "New" and add the path to your Python installation (e.g., `C:\Python39` and `C:\Python39\Scripts`).
 6. Click "OK" to close all the windows.
 
-### Step 2: Run the Installation Script
+### Step 2: Run the Installation Script (This script will download all the dependencies required for you)
 
 1. Open PowerShell as an Administrator:
    - Right-click the Start menu and select "Windows PowerShell (Admin)".
