@@ -1,22 +1,22 @@
 from discord.ext import commands, tasks
 import discord
 import yt_dlp as youtube_dl
-import pytz
-from datetime import datetime
 from dataclasses import dataclass
 import random
 import asyncio
 import re
 from googleapiclient.discovery import build
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import os
+import sys
+
 
 
 
 ################################## SET UP ###############################################
-BOT_TOKEN = "ENTER BOT TOKEN HERE"
-CHANNEL_ID = ENTER CHANNEL ID HERE
-WATER_REMINDER_MINUTES = 30
-YOUTUBE_API_KEY = "ENTER YOUTUBE API KEY HERE"
+from config import BOT_TOKEN, CHANNEL_ID, YOUTUBE_API_KEY, FFMPEG_PATH as ffmpeg_path
 
 bot = commands.Bot(command_prefix ="!", intents=discord.Intents.all())
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
@@ -33,43 +33,8 @@ async def on_ready():
     print(random.choice(welcome_messages))
     channel = bot.get_channel(CHANNEL_ID)
     await channel.send(random.choice(welcome_messages))
-###############################################################################################
-
-############### Water Reminder ########################
-@dataclass
-class drinksession:
-    is_active: bool = False
-
-drinksession = drinksession()
-
-@tasks.loop(minutes = WATER_REMINDER_MINUTES) #water_reminder_minutes is a placeholder, in function drink, change_interval will be the actual interval
-async def water_reminder():
-    if water_reminder.current_loop == 0:
-        return
-    channel = bot.get_channel(CHANNEL_ID)
-    await channel.send("Time to drink water!")
-
-@bot.command()
-async def drink(ctx, x:int):
-    if drinksession.is_active:
-        await ctx.send(f"Another drink reminder is currently active!")
-        return
-    drinksession.is_active = True
-    water_reminder.change_interval(minutes = x)
-    water_reminder.start()
-    await ctx.send(f"Water reminder started! You will be reminded every {x} minutes.")
-    
-@bot.command()
-async def stopdrink(ctx):
-    if not drinksession.is_active:
-        await ctx.send(f"No drink reminders currently active. Start one!")
-        return
-    drinksession.is_active = False
-    water_reminder.stop()
-    await ctx.send(f"Water reminder stopped. Don't forget to hydrate yourself!")
     
 ###############################################################################
-
 ######################## MUSIC BOT ############################################
 
 @dataclass
@@ -113,7 +78,6 @@ class MusicQueue:
             await ctx.send("The queue is empty.")
 
 Music_Queue = MusicQueue()
-ffmpeg_path = "C:/ffmpeg/bin/ffmpeg.exe" 
 
 ytdl_format_options = {
     'format': 'bestaudio[ext=webm]/bestaudio[ext=mp4]/best', #Chooses the best audio quality
@@ -255,7 +219,7 @@ async def update_playback(ctx):
             await ctx.send(embed=embed)
 
 #This function is needed because from_url function is used for individual videos    
-async def search_youtube_playlist(genre):
+async def search_youtube_playlist(ctx, genre):
     search_query = f"top {genre} hits playlist"
     request = youtube.search().list(
         q = search_query,
@@ -278,32 +242,36 @@ async def search_youtube_playlist(genre):
             playlist_response = await asyncio.to_thread(playlist_request.execute)
             playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
             print(playlist_url)
+            await ctx.send(f"Playing from: {playlist_url}")
             item_count = playlist_response['items'][0]['contentDetails']['itemCount']
             if item_count >= 50:
                 playlists.append(playlist_id)
 
     return playlists
 
-async def get_playlist_songs(playlist_id):
+async def get_playlist_songs(ctx, playlist_id):
     songs = []
     next_page_token = None
     while True:
-        request = youtube.playlistItems().list(
-            playlistId=playlist_id,
-            part="snippet",
-            maxResults=25,  #number of songs to fetch per request
-            pageToken=next_page_token
-        )
-        response = await asyncio.to_thread(request.execute)
-        for item in response['items']:
-            video_id = item['snippet']['resourceId']['videoId']
-            songs.append({
-                "url": f"https://www.youtube.com/watch?v={video_id}",
-                "title": item['snippet']['title']
-            })    
-        next_page_token = response.get('nextPageToken')
-        if not next_page_token:
-            break
+        try:
+            request = youtube.playlistItems().list(
+                playlistId=playlist_id,
+                part="snippet",
+                maxResults=25,  #number of songs to fetch per request
+                pageToken=next_page_token
+            )
+            response = await asyncio.to_thread(request.execute)
+            for item in response['items']:
+                video_id = item['snippet']['resourceId']['videoId']
+                songs.append({
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "title": item['snippet']['title']
+                })    
+            next_page_token = response.get('nextPageToken')
+            if not next_page_token:
+                break
+        except Exception as e:
+            await ctx.send("An error occured while processing your request. Restart the bot or check if you keyed in the commands correctly.")
     return songs
 
 @bot.command(help="Shuffles current queue and the remaining playlist songs")
@@ -343,48 +311,51 @@ async def play(ctx,*, args:str = commands.parameter(default=None, description=":
     is_playlist = "playlist" in url
 
     #Add the song to a queue
-    if is_playlist:
-        stoptask()
-        if ctx.voice_client.is_playing():
-            Music_Queue.queue = []
-            ctx.voice_client.stop()
-            
-        if ctx.voice_client is None: #If the bot is currently connected to a voice channel
-            await channel.connect()
-        playlist_id = extract_playlist_id(url)
-        all_songs = await get_playlist_songs(playlist_id)
-        print("length of all songs: "+ str(len(all_songs)))
-        if not all_songs:
-            await ctx.send("No songs found in the playlist.")
-            return
-        await ctx.send("Loading playlist...")
-        if (shuffle == 's' or 'S' or "shuffle"):
-            random.shuffle(all_songs)
-            await ctx.send("Playlist will be shuffled.")
-        if len(all_songs) <= 5:
-            for song in all_songs:
-                await Music_Queue.enqueue(song['url'],ctx.author,is_dj = False)
-            await ctx.send("Loaded playlist!")
-            await playnext(ctx)
-        else:
-            initial_songs = all_songs[:5]
-            remaining_songs = all_songs[5:]
-            if Music_Queue.is_empty():
-                for song in initial_songs:
-                    await Music_Queue.enqueue(song['url'], ctx.author, is_dj=False)
+    try:
+        if is_playlist:
+            stoptask()
+            if ctx.voice_client.is_playing():
+                Music_Queue.queue = []
+                ctx.voice_client.stop()
+                
+            if ctx.voice_client is None: #If the bot is currently connected to a voice channel
+                await channel.connect()
+            await ctx.send("Loading playlist...")
+            playlist_id = extract_playlist_id(url)
+            all_songs = await get_playlist_songs(ctx, playlist_id)
+            print("length of all songs: "+ str(len(all_songs)))
+            if not all_songs:
+                await ctx.send("No songs found in the playlist.")
+                return
+            if (shuffle == 's' or 'S' or "shuffle"):
+                random.shuffle(all_songs)
+                await ctx.send("Playlist will be shuffled.")
+            if len(all_songs) <= 5:
+                for song in all_songs:
+                    await Music_Queue.enqueue(song['url'],ctx.author,is_dj = False)
                 await ctx.send("Loaded playlist!")
                 await playnext(ctx)
-                
-            # Start the task to enqueue remaining songs
-            enqueue_remaining_songs(ctx, remaining_songs)
-    else:
-        if(len(Music_Queue.queue) > 1 or ctx.voice_client.is_playing()):
-            await Music_Queue.enqueue(url,ctx.author,is_dj = False)
-            await ctx.send("Added to queue.")
+            else:
+                initial_songs = all_songs[:5]
+                remaining_songs = all_songs[5:]
+                if Music_Queue.is_empty():
+                    for song in initial_songs:
+                        await Music_Queue.enqueue(song['url'], ctx.author, is_dj=False)
+                    await ctx.send("Loaded playlist!")
+                    await playnext(ctx)
+                    
+                # Start the task to enqueue remaining songs
+                enqueue_remaining_songs(ctx, remaining_songs)
         else:
-            if Music_Queue.is_empty():
+            if(len(Music_Queue.queue) > 1 or ctx.voice_client.is_playing()):
                 await Music_Queue.enqueue(url,ctx.author,is_dj = False)
-                await playnext(ctx)
+                await ctx.send("Added to queue.")
+            else:
+                if Music_Queue.is_empty():
+                    await Music_Queue.enqueue(url,ctx.author,is_dj = False)
+                    await playnext(ctx)
+    except:
+        await ctx.send("An error occured while trying to play the song. Please try again or restart the bot.")
 
 
 @bot.command(help="Toggles repeat mode for the current song")
@@ -461,7 +432,7 @@ async def skip(ctx):
     ctx.voice_client.stop() #playnext(ctx) will automatically be called as it is set as the "after" callback
     await ctx.send("Song skipped.")
 
-@bot.command(help = "Kills the current music session", aliases = ['end'])
+@bot.command(help = "Kills the current music session", aliases = ['end','stop'])
 async def kill(ctx):
     for t in started_tasks:
         t.cancel()
@@ -471,10 +442,6 @@ async def kill(ctx):
     
     if ctx.voice_client is None:
         await ctx.send("I'm not connected to a voice channel💢")
-        return
-    
-    if not ctx.voice_client.is_playing():
-        await ctx.send("There's no music playing💢")
         return
     
     Music_Queue.clear()
@@ -585,7 +552,7 @@ async def dj(ctx, *, genre:str = commands.parameter(default = None, description=
     if ctx.voice_client.is_playing() or len(Music_Queue.queue) != 0:
         await kill(ctx)    
     
-    playlists = await search_youtube_playlist(genre)
+    playlists = await search_youtube_playlist(ctx, genre)
     if not playlists:
         await ctx.send("Oops... No playlists found, try to tweak your search a little!")
         return
@@ -595,7 +562,7 @@ async def dj(ctx, *, genre:str = commands.parameter(default = None, description=
     remaining_songs = []
     
     selected_playlist = random.choice(playlists)
-    all_songs = await get_playlist_songs(selected_playlist)
+    all_songs = await get_playlist_songs(ctx, selected_playlist)
     random.shuffle(all_songs)
     
     if not all_songs:
@@ -712,6 +679,101 @@ async def eqreset(ctx):
     if ctx.voice_client.is_playing():
         await update_playback(ctx)
 
+audio_presets = {
+    "pop": {
+        '32Hz': 6,
+        '64Hz': 5,
+        '125Hz': 4,
+        '250Hz': 2,
+        '500Hz': 0,
+        '1kHz': 0,
+        '2kHz': 2,
+        '4kHz': 4,
+        '8kHz': 5,
+        '16kHz': 6
+    },
+    "rock": {
+        '32Hz': 5,
+        '64Hz': 4,
+        '125Hz': 3,
+        '250Hz': 2,
+        '500Hz': 1,
+        '1kHz': 2,
+        '2kHz': 4,
+        '4kHz': 5,
+        '8kHz': 4,
+        '16kHz': 3
+    },
+    "jazz": {
+        '32Hz': 3,
+        '64Hz': 4,
+        '125Hz': 3,
+        '250Hz': 2,
+        '500Hz': 3,
+        '1kHz': 3,
+        '2kHz': 2,
+        '4kHz': 2,
+        '8kHz': 3,
+        '16kHz': 4
+    },
+    "classical": {
+        '32Hz': 0,
+        '64Hz': 0,
+        '125Hz': 0,
+        '250Hz': 0,
+        '500Hz': 0,
+        '1kHz': 0,
+        '2kHz': 0,
+        '4kHz': 0,
+        '8kHz': 0,
+        '16kHz': 0
+    },
+    "bass_boost": {
+        '32Hz': 9,
+        '64Hz': 8,
+        '125Hz': 7,
+        '250Hz': 6,
+        '500Hz': 4,
+        '1kHz': 0,
+        '2kHz': 0,
+        '4kHz': 0,
+        '8kHz': 0,
+        '16kHz': 0
+    },
+    "treble_boost": {
+        '32Hz': 0,
+        '64Hz': 0,
+        '125Hz': 0,
+        '250Hz': 0,
+        '500Hz': 0,
+        '1kHz': 2,
+        '2kHz': 4,
+        '4kHz': 6,
+        '8kHz': 7,
+        '16kHz': 9
+    }
+}
+
+@bot.command(help="Applies a preset to the equalizer. Format: !preset <preset_name>")
+async def preset(ctx, preset_name: str = commands.parameter(default=None, description=": Name of the preset to apply (e.g., 'pop', 'rock').")):
+    if preset_name is None or preset_name not in audio_presets:
+        await ctx.send("Invalid preset name. Please choose from 'pop', 'rock', 'jazz', 'classical', 'bass_boost', 'treble_boost'.")
+        return
+
+    global equalizer_settings
+    equalizer_settings = audio_presets[preset_name]
+    await ctx.send(f"Applied the {preset_name} preset to the equalizer.")
+    generate_equalizer_graph(equalizer_settings)
+    await ctx.send(file=discord.File('equalizer.png'))
+    if ctx.voice_client.is_playing():
+        await update_playback(ctx)
+
+@bot.command(help="Restarts the bot")
+@commands.has_permissions(administrator=True)
+async def restart(ctx):
+    await ctx.send("Restarting the bot...")
+    python = sys.executable
+    os.execv(python, [python] + sys.argv)
+
+
 bot.run(BOT_TOKEN)
-
-
