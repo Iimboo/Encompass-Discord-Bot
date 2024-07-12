@@ -23,7 +23,7 @@ youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
 
 @bot.event #decorator that takes the function "on_ready"
-async def on_ready():
+async def on_ready(): 
     welcome_messages = [
     "I'm ALIVEEEEEEEEEEE!",
     "Greetings, fellow human! 🤖 I’m here and ready to serve!",
@@ -244,8 +244,7 @@ async def search_youtube_playlist(ctx, genre):
             print(playlist_url)
             await ctx.send(f"Playing from: {playlist_url}")
             item_count = playlist_response['items'][0]['contentDetails']['itemCount']
-            if item_count >= 50:
-                playlists.append(playlist_id)
+            playlists.append(playlist_id)
 
     return playlists
 
@@ -377,12 +376,19 @@ async def repeat(ctx):
             Music_Queue.dequeue()
         
 repeatedurl = ""
+playnext_running = False
 async def playnext(ctx):
+    global playnext_running
+    if playnext_running:
+        return
+
     if ctx.voice_client.is_paused():
         return
     
-    if Music_Queue.is_empty():
+    elif Music_Queue.is_empty():
         return
+    else:
+        playnext_running = True
     
     item= Music_Queue.dequeue()
     if Music_Queue.repeat:
@@ -414,10 +420,14 @@ async def playnext(ctx):
     if 'thumbnail' in player.data:
         embed.set_thumbnail(url = player.data['thumbnail'])
     await ctx.send(embed=embed)
-    
+
+    playnext_running = False
+   
 
 @bot.command(help = "Skips the current song")
 async def skip(ctx):
+    global playnext_running
+
     if ctx.author.voice is None:
         await ctx.send("You're not in a voice channel.")
         return
@@ -429,11 +439,15 @@ async def skip(ctx):
         Music_Queue.repeat = False
         Music_Queue.dequeue()
     
+    playnext_running = False
+
     ctx.voice_client.stop() #playnext(ctx) will automatically be called as it is set as the "after" callback
     await ctx.send("Song skipped.")
 
 @bot.command(help = "Kills the current music session", aliases = ['end','stop'])
 async def kill(ctx):
+    global playnext_running
+    playnext_running = False
     for t in started_tasks:
         t.cancel()
     if ctx.author.voice is None:
