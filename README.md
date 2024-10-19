@@ -61,6 +61,7 @@ The Discord bot token and YouTube API key and Channel ID are essential for the c
 2. Download the latest version of Python.
 3. Run the Python installer.
 4. **Important**: During the installation, make sure to check the box that says "Add Python to PATH". If you skip this step, you will need to add Python to your system environment variables manually.
+5. For NEWER versions of Python (3.13 and above), run "pip install audioop-lts" in the command prompt as newer versions of python has removed that module.
 
 #### Adding Python to the System Path Manually (If Skipped):
 
