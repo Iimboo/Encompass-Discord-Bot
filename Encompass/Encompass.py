@@ -291,12 +291,15 @@ async def play(ctx,*, args:str = commands.parameter(default=None, description=":
         await ctx.send("Enter something...!!!")
         return
     
-    args = args.split()
-    url = args[0]
-    shuffle = args[1] if len(args) > 1 and args[1] in ['s', 'S', 'shuffle'] else None
-    if (shuffle != 's' and 'S' and "shuffle" and None):
-        await ctx.send("Invalid shuffle option, use '!help play' to find out more.")
-        return
+    
+    tempargs = args.split()
+    if tempargs[-1] in ['s','S','shuffle']:
+        shuffle = tempargs[-1]
+        tempargs = tempargs[:-1]
+        url = " ".join(tempargs)
+    else:
+        url = args
+    
     
     #Checks if the user is in a VC
     if ctx.author.voice is None:
